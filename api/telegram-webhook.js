@@ -2,49 +2,73 @@ const { db } = require('../lib/firebase');
 const { enviarTelegram, enviarAccionEscribiendo } = require('../lib/telegram');
 const { buscarPerfume } = require('../lib/busqueda');
 
-const VERSION_CODIGO = 'vercel-v1';
+const VERSION_CODIGO = 'vercel-v2-dedup';
+
+// Evita procesar el mismo mensaje mas de una vez si Telegram reintenta la
+// entrega (pasa cuando la funcion tarda en responder, ej. arranque en frio).
+// Se revisa y se marca por separado a proposito: solo se marca como "listo"
+// cuando el mensaje termino de procesarse con exito, para que un fallo real
+// no deje el mensaje mudo para siempre.
+async function yaProcesado(updateId) {
+  const doc = await db.collection('procesados').doc(String(updateId)).get();
+  return doc.exists;
+}
+
+async function marcarProcesado(updateId) {
+  await db.collection('procesados').doc(String(updateId)).set({ fecha: new Date().toISOString() });
+}
 
 module.exports = async (req, res) => {
-    if (req.method !== 'POST') return res.status(200).send('ok');
+  if (req.method !== 'POST') return res.status(200).send('ok');
 
-    const body = req.body;
-    const msg = body && body.message;
-    if (!msg || !msg.text) return res.status(200).send('ok');
+  const body = req.body;
+  const msg = body && body.message;
+  if (!msg || !msg.text) return res.status(200).send('ok');
 
-    const chatId = String(msg.chat.id);
-    const text = msg.text.trim();
-
-    if (!text.startsWith('/')) enviarAccionEscribiendo(chatId);
-
-    try {
-          if (text === '/start') {
-                  await db.collection('chats').doc(chatId).set({ registradoEn: new Date().toISOString() });
-                  await enviarTelegram(chatId,
-                                               'Listo! Quedaste registrado.\n\nEscribeme el nombre de un perfume (ej: "club de nuit intense man edt") y te digo que proveedor lo tiene, presentacion y precio.\n\nComandos:\n/cambios — ultimos cambios detectados\n/version — version del codigo en uso\n/ayuda — ver esto de nuevo'
-                                             );
-          } else if (text === '/ayuda') {
-                  await enviarTelegram(chatId,
-                                               'Escribeme el nombre de un perfume y busco en ambos proveedores.\n\nComandos:\n/cambios — ultimos cambios detectados (nuevos, sold out, precios)\n/version — version del codigo en uso\n/ayuda — este mensaje'
-                                             );
-          } else if (text === '/cambios') {
-                  const doc = await db.collection('estado').doc('ultimoDigest').get();
-                  await enviarTelegram(chatId, doc.exists ? doc.data().texto : 'Todavia no se ha detectado ningun cambio.');
-          } else if (text === '/version') {
-                  await enviarTelegram(chatId, 'Version del codigo en este momento: ' + VERSION_CODIGO);
-          } else if (text.startsWith('/')) {
-                  await enviarTelegram(chatId, 'No reconozco ese comando. Prueba /ayuda');
-          } else {
-                  const resultado = await buscarPerfume(text);
-                  await enviarTelegram(chatId, resultado);
-          }
-    } catch (err) {
-          console.error('Error procesando mensaje "' + text + '":', err);
-          try {
-                  await enviarTelegram(chatId, 'Tuve un problema buscando eso. Intenta de nuevo en un momento.');
-          } catch (err2) {
-                  console.error('Tambien fallo el aviso de error:', err2);
-          }
-    }
-
+  const updateId = body.update_id;
+  if (updateId && await yaProcesado(updateId)) {
     return res.status(200).send('ok');
+  }
+
+  const chatId = String(msg.chat.id);
+  const text = msg.text.trim();
+  let terminoBien = false;
+
+  if (!text.startsWith('/')) enviarAccionEscribiendo(chatId);
+
+  try {
+    if (text === '/start') {
+      await db.collection('chats').doc(chatId).set({ registradoEn: new Date().toISOString() });
+      await enviarTelegram(chatId,
+        'Listo! Quedaste registrado.\n\nEscribeme el nombre de un perfume (ej: "club de nuit intense man edt") y te digo que proveedor lo tiene, presentacion y precio.\n\nComandos:\n/cambios — ultimos cambios detectados\n/version — version del codigo en uso\n/ayuda — ver esto de nuevo'
+      );
+    } else if (text === '/ayuda') {
+      await enviarTelegram(chatId,
+        'Escribeme el nombre de un perfume y busco en ambos proveedores.\n\nComandos:\n/cambios — ultimos cambios detectados (nuevos, sold out, precios)\n/version — version del codigo en uso\n/ayuda — este mensaje'
+      );
+    } else if (text === '/cambios') {
+      const doc = await db.collection('estado').doc('ultimoDigest').get();
+      await enviarTelegram(chatId, doc.exists ? doc.data().texto : 'Todavia no se ha detectado ningun cambio.');
+    } else if (text === '/version') {
+      await enviarTelegram(chatId, 'Version del codigo en este momento: ' + VERSION_CODIGO);
+    } else if (text.startsWith('/')) {
+      await enviarTelegram(chatId, 'No reconozco ese comando. Prueba /ayuda');
+    } else {
+      const resultado = await buscarPerfume(text);
+      await enviarTelegram(chatId, resultado);
+    }
+    terminoBien = true;
+  } catch (err) {
+    console.error('Error procesando mensaje "' + text + '":', err);
+    try {
+      await enviarTelegram(chatId, 'Tuve un problema buscando eso. Intenta de nuevo en un momento.');
+      terminoBien = true;
+    } catch (err2) {
+      console.error('Tambien fallo el aviso de error:', err2);
+    }
+  }
+
+  if (updateId && terminoBien) await marcarProcesado(updateId);
+
+  return res.status(200).send('ok');
 };
