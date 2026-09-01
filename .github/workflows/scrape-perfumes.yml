@@ -1,0 +1,28 @@
+name: Scrape Perfumes (Crist + FragranceShop)
+
+on:
+  schedule:
+    # 12:00 UTC = 7:00 AM hora Perú (UTC-5)
+    - cron: '0 12 * * *'
+  workflow_dispatch: {} # permite correrlo manualmente desde la pestaña "Actions"
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Instalar dependencias
+        run: |
+          npm install playwright
+          npx playwright install --with-deps chromium
+
+      - name: Ejecutar scraper
+        run: node scrape.js
+        env:
+          INGESTA_URL: ${{ secrets.INGESTA_URL }}
+          INGEST_TOKEN: ${{ secrets.INGEST_TOKEN }}
